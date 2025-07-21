@@ -1,0 +1,2 @@
+pip install stellar-sdk bip_utils
+python bot.py
