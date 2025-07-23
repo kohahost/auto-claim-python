@@ -2,7 +2,7 @@ from bip_utils import Bip39SeedGenerator, Bip32Slip10Ed25519
 from stellar_sdk import Keypair, StrKey, Server
 
 #fill in with the phrase that will pay the fee
-mnemonic = "isi dengan pharsa yang akan membayar fee"
+mnemonic = "wide reveal among fiscal figure cycle predict hour shoe salon keep leg recipe home craft surface supreme sort zero knife sunny room comfort leaf"
 
 # Generate keys
 seed = Bip39SeedGenerator(mnemonic).Generate()
