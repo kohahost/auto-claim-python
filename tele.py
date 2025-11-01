@@ -11,8 +11,10 @@ import threading
 import logging
 import uuid
 from telegram import Update
-from telegram.constants import ParseMode # <-- PERBAIKAN DI SINI
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
+from telegram.constants import ParseMode
+# PERUBAHAN DI SINI
+from telegram.ext import filters, Updater, CommandHandler, MessageHandler, ConversationHandler, CallbackContext
+# AKHIR PERUBAHAN
 
 # =============================================================================
 # --- KONFIGURASI BOT & JARINGAN ---
@@ -174,7 +176,7 @@ class ClaimProcess:
                 fee_payer_account.sequence = base_sequence + i
                 tx = TransactionBuilder(
                         source_account=fee_payer_account, network_passphrase=NETWORK_PASSPHRASSE, base_fee=BASE_FEE
-                    ).append_claim_claimable_balance_op(
+                    ).append_claim_claim_balance_op(
                         balance_id=self.unlock_id, source=self.pi_keypair.public_key
                     ).append_payment_op(
                         destination=DESTINATION_ADDRESS, amount=self.unlock_balance, asset=Asset.native(), source=self.pi_keypair.public_key
@@ -274,24 +276,27 @@ def main() -> None:
         print("!!! KESALAHAN: Harap isi TELEGRAM_BOT_TOKEN dan ADMIN_CHAT_ID di dalam skrip.")
         return
 
-    updater = Updater(TELEGRAM_BOT_TOKEN)
-    dispatcher = updater.dispatcher
+    # Di v20, Updater diganti ApplicationBuilder
+    from telegram.ext import Application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('claim', claim_command)],
         states={
-            WAITING_MNEMONIC: [MessageHandler(Filters.text & ~Filters.command, receive_mnemonic)],
+            # PERUBAHAN DI SINI
+            WAITING_MNEMONIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_mnemonic)],
+            # AKHIR PERUBAHAN
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("status", status_command))
-    dispatcher.add_handler(conv_handler)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(conv_handler)
     
     print("Bot multi-claim sedang berjalan... Tekan Ctrl+C untuk berhenti.")
-    updater.start_polling()
-    updater.idle()
+    application.run_polling()
+
 
 if __name__ == '__main__':
     main()
