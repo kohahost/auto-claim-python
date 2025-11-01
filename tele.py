@@ -8,260 +8,289 @@ from stellar_sdk import Keypair, StrKey, Server, TransactionBuilder, Asset
 from datetime import datetime, timezone, timedelta
 import time
 import threading
-import requests
+import logging
+import uuid
+from telegram import Update, ParseMode
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
 
 # =============================================================================
-# --- KONFIGURASI ---
-# Ganti nilai di bawah ini sesuai dengan kebutuhan Anda
+# --- KONFIGURASI BOT & JARINGAN ---
+# Ganti nilai di bawah ini
 # =============================================================================
 
-# -- Konfigurasi Notifikasi Telegram --
-# Dapatkan dari @BotFather di Telegram
-TELEGRAM_BOT_TOKEN = "8473474866:AAGkldHvcmJkkqbt-FdrO46kX-K4MVtLa9A" 
-# Dapatkan dari @userinfobot di Telegram
-TELEGRAM_CHAT_ID = "7890743177"
+# -- Konfigurasi Telegram --
+TELEGRAM_BOT_TOKEN = "8473474866:AAGkldHvcmJkkqbt-FdrO46kX-K4MVtLa9A"
+# ID Telegram Anda, agar hanya Anda yang bisa menggunakan bot ini
+ADMIN_CHAT_ID = 0  # GANTI DENGAN CHAT ID ADMIN (WAJIB DIISI, misal: 123456789)
 
 # -- Konfigurasi Jaringan & Transaksi --
-NETWORK_PASSPHRASE = "Pi Network"
+NETWORK_PASSPHRASSE = "Pi Network"
 HORIZON_URL = "http://4.194.35.14:31401"
-BASE_FEE = 40000000 # Biaya dasar per operasi
+BASE_FEE = 40000000
 
 # -- Konfigurasi Akun --
-# Rahasia (Secret Key) akun yang akan membayar biaya transaksi
-TX_PAYER_SECRET = ""
-# Alamat (Public Key) tujuan pengiriman Pi setelah di-klaim
+TX_PAYER_SECRET = "SAVB25TPJNM7O5EO46R6TRAKIFLJDWSWWIP5WPKMU2Z72LZSH3QUWHGM"
 DESTINATION_ADDRESS = "GA2CXP2KK2PANC3JDEZLRKONYZBWXMTHY3N235QNJQFGGTJRUMPNM75X"
 
 # -- Konfigurasi Strategi --
-# Jumlah transaksi yang akan dikirim secara paralel untuk memaksimalkan peluang
-PARALLEL_COUNT = 50 
-# Berapa detik sebelum unlock transaksi akan dikirim (untuk antisipasi latensi)
+PARALLEL_COUNT = 50
 SEND_OFFSET_SECONDS = 0.2
-# Sisa saldo yang akan ditinggalkan di claimable balance (misal: 1 Pi)
 REMAIN_BALANCE = 1
 
 # =============================================================================
-# --- VARIABEL GLOBAL & KUNCI (JANGAN DIUBAH) ---
+# --- PENGATURAN LOGGING & KUNCI (JANGAN DIUBAH) ---
 # =============================================================================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 KP_TX_PAYER = Keypair.from_secret(TX_PAYER_SECRET)
 TX_PAYER_AD = KP_TX_PAYER.public_key
-your_timezone = timezone(timedelta(hours=1)) # Sesuaikan jika zona waktu Anda berbeda
 
-# Status untuk mengontrol notifikasi agar tidak spam
-SUCCESS_NOTIFIED = False
-notification_lock = threading.Lock()
+# State untuk ConversationHandler
+WAITING_MNEMONIC = 0
 
-# Variabel untuk menyimpan detail unlock
-UNLOCK_ID = None
-UNLOCK_TIME = None
-UNLOCK_BALANCE = None
-UNLOCKS = False
+# Dictionary untuk menyimpan tugas-tugas klaim yang aktif
+ACTIVE_TASKS = {}
+task_lock = threading.Lock()
 
 # =============================================================================
-# --- FUNGSI-FUNGSI UTAMA ---
+# --- KELAS UNTUK MENGELOLA SETIAP PROSES KLAIM ---
 # =============================================================================
-
-def send_telegram_notification(message):
-    """Mengirim pesan notifikasi ke bot Telegram dengan format MarkdownV2."""
-    if "GANTI_DENGAN" in TELEGRAM_BOT_TOKEN or "GANTI_DENGAN" in TELEGRAM_CHAT_ID:
-        print("[PERINGATAN TELEGRAM] Token Bot atau Chat ID belum diatur. Melewatkan notifikasi.")
-        return
-
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    
-    # Escape karakter khusus untuk MarkdownV2
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    escaped_message = "".join(['\\' + char if char in escape_chars else char for char in message])
-
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': escaped_message, 'parse_mode': 'MarkdownV2'}
-    
-    try:
-        response = requests.post(api_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            print(f"[ERROR TELEGRAM] Gagal mengirim notifikasi: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR TELEGRAM] Terjadi kesalahan saat koneksi: {e}")
-
-def get_pi_keys_from_mnemonic(mnemonic):
-    """Mendapatkan kunci Stellar dari mnemonic Pi."""
-    if not Bip39MnemonicValidator().IsValid(mnemonic):
-        raise ValueError("Mnemonic tidak valid.")
-    seed_bytes = Bip39SeedGenerator(mnemonic).Generate()
-    bip32_ctx = Bip32Slip10Ed25519.FromSeed(seed_bytes)
-    derived = bip32_ctx.DerivePath("m/44'/314159'/0'")
-    priv_key_bytes = derived.PrivateKey().Raw().ToBytes()
-    secret = StrKey.encode_ed25519_secret_seed(priv_key_bytes)
-    keypair = Keypair.from_secret(secret)
-    return keypair
-
-def find_next_unlock(claimables, account_id):
-    """Mencari dan menetapkan jadwal unlock berikutnya dari daftar claimable balances."""
-    global UNLOCK_TIME, UNLOCK_ID, UNLOCK_BALANCE, UNLOCKS
-    
-    next_unlock_time = None
-    next_unlock_details = {}
-
-    if not claimables or not claimables["_embedded"]["records"]:
-        print("Tidak ada claimable balance ditemukan.")
-        UNLOCKS = False
-        return
-
-    for c in claimables["_embedded"]["records"]:
-        for claimant in c["claimants"]:
-            if claimant["destination"] != account_id:
-                continue
-            
-            predicate = claimant.get("predicate", {})
-            if "not" in predicate and "abs_before" in predicate["not"]:
-                unlock_utc_str = predicate["not"]["abs_before"]
-                unlock_utc = datetime.fromisoformat(unlock_utc_str.replace("Z", "+00:00"))
-
-                # Hanya proses unlock yang akan datang
-                if unlock_utc > datetime.now(timezone.utc):
-                    if next_unlock_time is None or unlock_utc < next_unlock_time:
-                        next_unlock_time = unlock_utc
-                        next_unlock_details = {
-                            "id": c["id"],
-                            "amount": c["amount"],
-                            "time_utc": unlock_utc
-                        }
-
-    if next_unlock_details:
-        UNLOCKS = True
-        UNLOCK_ID = next_unlock_details["id"]
-        UNLOCK_TIME = next_unlock_details["time_utc"]
-        amount_to_send = float(next_unlock_details["amount"]) - REMAIN_BALANCE
-        UNLOCK_BALANCE = f"{amount_to_send:.7f}"
-    else:
-        print("Tidak ada jadwal unlock di masa depan yang ditemukan.")
-        UNLOCKS = False
-
-def build_transaction(source_account, claim_id, destination, amount, keypair):
-    """Membangun satu transaksi 'claim and send'."""
-    tx = (
-        TransactionBuilder(source_account=source_account, network_passphrase=NETWORK_PASSPHRASE, base_fee=BASE_FEE)
-        .append_claim_claimable_balance_op(balance_id=claim_id, source=keypair.public_key)
-        .append_payment_op(destination=destination, amount=amount, asset=Asset.native(), source=keypair.public_key)
-        .set_timeout(30)
-        .build()
-    )
-    tx.sign(keypair)
-    tx.sign(KP_TX_PAYER)
-    return tx
-
-def submit_single_transaction(tx, tx_num, server):
-    """Fungsi target untuk setiap thread, mengirim satu transaksi."""
-    global SUCCESS_NOTIFIED
-    try:
-        response = server.submit_transaction(tx)
-        print(f"[PASS] Transaksi #{tx_num} Berhasil Dikirim!")
-        with notification_lock:
-            if not SUCCESS_NOTIFIED:
-                message = (f"✅ *TRANSAKSI BERHASIL (No. {tx_num})*\n\n"
-                           f"Amount: {UNLOCK_BALANCE} Pi\n"
-                           f"Hash: `{response['hash']}`")
-                send_telegram_notification(message)
-                SUCCESS_NOTIFIED = True
-    except Exception as e:
-        # Hanya tampilkan error untuk transaksi pertama agar log tidak penuh
-        if tx_num == 0:
-            print(f"[ERROR] Transaksi #{tx_num} Gagal: {e}")
-            with notification_lock:
-                # Kirim notif gagal hanya jika belum ada yang sukses
-                if not SUCCESS_NOTIFIED:
-                    error_message = str(e)
-                    # Coba ekstrak pesan error yang lebih bersih
-                    if "op_no_trust" in error_message:
-                        error_clean = "Tujuan belum mengaktifkan trustline Pi."
-                    elif "tx_bad_seq" in error_message:
-                        error_clean = "Sequence number salah (tx_bad_seq)."
-                    else:
-                        error_clean = "Cek log untuk detail."
-                    
-                    message_gagal = (f"❌ *TRANSAKSI GAGAL*\n\n"
-                                     f"Error Utama: `{error_clean}`")
-                    send_telegram_notification(message_gagal)
-                    SUCCESS_NOTIFIED = True # Set agar notifikasi gagal tidak dikirim lagi
-
-def launch_transactions(transactions, server):
-    """Meluncurkan semua transaksi yang sudah disiapkan secara serentak."""
-    threads = []
-    print(f"\n[LAUNCH] Meluncurkan {len(transactions)} transaksi secara serentak...")
-    for i, tx in enumerate(transactions):
-        t = threading.Thread(target=submit_single_transaction, args=(tx, i, server))
-        t.start()
-        threads.append(t)
-    
-    for t in threads:
-        t.join()
-    print("[FINISH] Semua upaya pengiriman transaksi telah selesai.")
-
-# =============================================================================
-# --- ALUR EKSEKUSI UTAMA ---
-# =============================================================================
-
-if __name__ == "__main__":
-    try:
-        # 1. Setup Awal
-        mnemonic = input("Masukkan Passphrase (24 kata) Anda: ")
-        pi_keypair = get_pi_keys_from_mnemonic(mnemonic)
-        print(f"\n[INFO] Alamat Pi Anda: {pi_keypair.public_key}")
+class ClaimProcess:
+    """Membungkus semua logika dan status untuk satu proses klaim."""
+    def __init__(self, context: CallbackContext, mnemonic: str):
+        self.context = context
+        self.mnemonic = mnemonic
+        self.task_id = str(uuid.uuid4())[:8] # ID unik untuk setiap tugas
+        self.pi_keypair = None
+        self.server = Server(HORIZON_URL)
         
-        server = Server(HORIZON_URL)
+        # Atribut status
+        self.status = "Initializing"
+        self.unlock_id = None
+        self.unlock_time = None
+        self.unlock_balance = None
+        self.success_notified = False
+        
+    def _send_message(self, text: str, **kwargs):
+        """Helper untuk mengirim pesan ke admin."""
+        self.context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=text, **kwargs)
 
-        # 2. Mencari Jadwal Unlock
-        print("[INIT] Mencari claimable balances...")
-        claimables_data = server.claimable_balances().for_claimant(pi_keypair.public_key).limit(20).call()
-        find_next_unlock(claimables_data, pi_keypair.public_key)
+    def _get_keys(self):
+        """Memvalidasi mnemonic dan mendapatkan kunci."""
+        self.status = "Validating mnemonic"
+        if not Bip39MnemonicValidator().IsValid(self.mnemonic):
+            raise ValueError("Mnemonic tidak valid.")
+        
+        seed_bytes = Bip39SeedGenerator(self.mnemonic).Generate()
+        bip32_ctx = Bip32Slip10Ed25519.FromSeed(seed_bytes)
+        derived = bip32_ctx.DerivePath("m/44'/314159'/0'")
+        priv_key_bytes = derived.PrivateKey().Raw().ToBytes()
+        secret = StrKey.encode_ed25519_secret_seed(priv_key_bytes)
+        self.pi_keypair = Keypair.from_secret(secret)
 
-        if UNLOCKS:
-            unlock_time_local = UNLOCK_TIME.astimezone(your_timezone)
-            print(f"[TARGET] Ditemukan unlock berikutnya pada: {unlock_time_local.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            print(f"[TARGET] ID Balance: {UNLOCK_ID}")
-            print(f"[TARGET] Amount akan dikirim: {UNLOCK_BALANCE} Pi")
-            send_telegram_notification(f"⏳ *MENUNGGU UNLOCK*\n\nJadwal: {unlock_time_local.strftime('%Y-%m-%d %H:%M:%S')}\nAmount: {UNLOCK_BALANCE} Pi")
+    def _find_next_unlock(self):
+        """Mencari jadwal unlock berikutnya."""
+        self.status = "Searching for unlock"
+        account_id = self.pi_keypair.public_key
+        claimables = self.server.claimable_balances().for_claimant(account_id).limit(20).call()
+        
+        next_unlock_time = None
+        next_unlock_details = {}
 
-            # 3. Persiapan Transaksi (sebelum countdown)
-            print(f"\n[PREPARE] Mempersiapkan {PARALLEL_COUNT} transaksi...")
-            fee_payer_account = server.load_account(TX_PAYER_AD)
-            base_sequence = fee_payer_account.sequence
+        if not claimables or not claimables["_embedded"]["records"]:
+            return False
+
+        for c in claimables["_embedded"]["records"]:
+            for claimant in c["claimants"]:
+                if claimant["destination"] != account_id: continue
+                
+                predicate = claimant.get("predicate", {})
+                if "not" in predicate and "abs_before" in predicate["not"]:
+                    unlock_utc = datetime.fromisoformat(predicate["not"]["abs_before"].replace("Z", "+00:00"))
+                    if unlock_utc > datetime.now(timezone.utc):
+                        if next_unlock_time is None or unlock_utc < next_unlock_time:
+                            next_unlock_time = unlock_utc
+                            next_unlock_details = {"id": c["id"], "amount": c["amount"], "time": unlock_utc}
+
+        if next_unlock_details:
+            self.unlock_id = next_unlock_details["id"]
+            self.unlock_time = next_unlock_details["time"]
+            amount_to_send = float(next_unlock_details["amount"]) - REMAIN_BALANCE
+            self.unlock_balance = f"{amount_to_send:.7f}"
+            return True
+        return False
+        
+    def _submit_single_transaction(self, tx, tx_num):
+        """Mengirim satu transaksi dan menangani notifikasi."""
+        try:
+            response = self.server.submit_transaction(tx)
+            logger.info(f"Task {self.task_id}: Transaksi #{tx_num} Berhasil!")
+            if not self.success_notified:
+                self.success_notified = True
+                message = (f"✅ *TRANSAKSI BERHASIL (Tugas: {self.task_id})*\n\n"
+                           f"Akun: `...{self.pi_keypair.public_key[-5:]}`\n"
+                           f"Amount: `{self.unlock_balance}` Pi\n"
+                           f"Hash: `{response['hash']}`")
+                self._send_message(message, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception as e:
+            if tx_num == 0 and not self.success_notified:
+                self.success_notified = True # Mencegah notif gagal berulang
+                logger.error(f"Task {self.task_id}: Transaksi #{tx_num} Gagal: {e}")
+                message_gagal = (f"❌ *TRANSAKSI GAGAL (Tugas: {self.task_id})*\n\n"
+                                 f"Akun: `...{self.pi_keypair.public_key[-5:]}`\n"
+                                 f"Error: `{str(e)}`")
+                self._send_message(message_gagal, parse_mode=ParseMode.MARKDOWN_V2)
+
+    def run(self):
+        """Metode utama yang menjalankan seluruh alur proses klaim."""
+        try:
+            self._send_message(f"Memulai tugas baru, ID: `{self.task_id}`", parse_mode=ParseMode.MARKDOWN_V2)
+            self._get_keys()
+            short_pk = f"...{self.pi_keypair.public_key[-5:]}"
+            self._send_message(f"✅ Tugas `{self.task_id}`: Validasi berhasil untuk akun `{short_pk}`.", parse_mode=ParseMode.MARKDOWN_V2)
             
-            prepared_transactions = []
+            if not self._find_next_unlock():
+                self.status = "Finished (No Unlock)"
+                self._send_message(f"ℹ️ Tugas `{self.task_id}`: Tidak ada jadwal unlock ditemukan untuk akun ini.", parse_mode=ParseMode.MARKDOWN_V2)
+                return
+
+            self.status = f"Waiting for unlock at {self.unlock_time.strftime('%H:%M:%S')}"
+            self._send_message(
+                f"🎯 Tugas `{self.task_id}`: Target ditemukan!\n\n"
+                f"Waktu: `{self.unlock_time.strftime('%Y-%m-%d %H:%M:%S UTC')}`\n"
+                f"Amount: `{self.unlock_balance}` Pi",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+
+            # Persiapan transaksi
+            fee_payer_account = self.server.load_account(TX_PAYER_AD)
+            base_sequence = fee_payer_account.sequence
+            prepared_txs = []
             for i in range(PARALLEL_COUNT):
                 fee_payer_account.sequence = base_sequence + i
-                tx = build_transaction(
-                    source_account=fee_payer_account,
-                    claim_id=UNLOCK_ID,
-                    destination=DESTINATION_ADDRESS,
-                    amount=UNLOCK_BALANCE,
-                    keypair=pi_keypair
-                )
-                prepared_transactions.append(tx)
-            
-            print("[PREPARE] Semua transaksi berhasil dibuat. Memulai countdown.")
+                tx = TransactionBuilder(
+                        source_account=fee_payer_account, network_passphrase=NETWORK_PASSPHRASSE, base_fee=BASE_FEE
+                    ).append_claim_claimable_balance_op(
+                        balance_id=self.unlock_id, source=self.pi_keypair.public_key
+                    ).append_payment_op(
+                        destination=DESTINATION_ADDRESS, amount=self.unlock_balance, asset=Asset.native(), source=self.pi_keypair.public_key
+                    ).set_timeout(30).build()
+                tx.sign(self.pi_keypair)
+                tx.sign(KP_TX_PAYER)
+                prepared_txs.append(tx)
 
-            # 4. Countdown dan Peluncuran
+            # Countdown
             while True:
-                now = datetime.now(timezone.utc)
-                time_diff = (UNLOCK_TIME - now).total_seconds()
-                
+                time_diff = (self.unlock_time - datetime.now(timezone.utc)).total_seconds()
                 if time_diff <= SEND_OFFSET_SECONDS:
-                    launch_transactions(prepared_transactions, server)
+                    self.status = "Executing"
+                    threads = [threading.Thread(target=self._submit_single_transaction, args=(tx, i)) for i, tx in enumerate(prepared_txs)]
+                    self._send_message(f"🚀 Tugas `{self.task_id}`: Meluncurkan {len(threads)} transaksi!", parse_mode=ParseMode.MARKDOWN_V2)
+                    for t in threads: t.start()
+                    for t in threads: t.join()
                     break
-                
-                if time_diff < 10: # Tampilkan countdown hanya jika sudah dekat
-                    # \r membawa kursor ke awal baris, end='' mencegah baris baru
-                    print(f"\r[COUNTDOWN] {time_diff:.2f} detik tersisa...", end="")
-                
-                time.sleep(0.02) # Cek setiap 20 milidetik
-        else:
-            send_telegram_notification("ℹ️ *INFO*\n\nTidak ada jadwal unlock di masa depan yang ditemukan untuk akun ini.")
+                time.sleep(0.1)
 
-    except ValueError as e:
-        print(f"\n[FATAL ERROR] {e}")
-        send_telegram_notification(f"🔥 *ERROR KRITIS*\n\nTerjadi kesalahan validasi: `{str(e)}`")
-    except Exception as e:
-        print(f"\n[FATAL ERROR] Terjadi kesalahan tak terduga: {e}")
-        send_telegram_notification(f"🔥 *ERROR KRITIS*\n\nTerjadi kesalahan tak terduga: `{str(e)}`")
+            self.status = "Finished"
 
-    print("\n[END] Skrip telah selesai dieksekusi.")
+        except Exception as e:
+            self.status = f"Error: {e}"
+            logger.error(f"Error fatal di tugas {self.task_id}: {e}", exc_info=True)
+            self._send_message(f"🔥 *ERROR KRITIS (Tugas: {self.task_id})*\n\n`{str(e)}`", parse_mode=ParseMode.MARKDOWN_V2)
+        
+        finally:
+            # Hapus tugas dari daftar aktif setelah selesai
+            with task_lock:
+                if self.task_id in ACTIVE_TASKS:
+                    del ACTIVE_TASKS[self.task_id]
+            logger.info(f"Tugas {self.task_id} telah selesai dan dihapus dari daftar aktif.")
+
+
+# =============================================================================
+# --- HANDLER UNTUK BOT TELEGRAM ---
+# =============================================================================
+
+def start(update: Update, context: CallbackContext) -> None:
+    if update.effective_user.id != ADMIN_CHAT_ID: return
+    update.message.reply_text(
+        "Bot multi-claim Pi Network aktif.\n"
+        "/claim - Menambahkan tugas klaim baru.\n"
+        "/status - Melihat semua tugas aktif."
+    )
+
+def claim_command(update: Update, context: CallbackContext) -> int:
+    if update.effective_user.id != ADMIN_CHAT_ID: return ConversationHandler.END
+    update.message.reply_text(
+        "Silakan kirim Passphrase (24 kata) untuk akun yang ingin Anda proses.\n"
+        "Pesan akan otomatis dihapus.\n\n"
+        "Kirim /cancel untuk membatalkan."
+    )
+    return WAITING_MNEMONIC
+
+def receive_mnemonic(update: Update, context: CallbackContext) -> int:
+    mnemonic = update.message.text
+    context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+
+    # Buat instance ClaimProcess baru dan jalankan di thread
+    claim_process = ClaimProcess(context, mnemonic)
+    
+    with task_lock:
+        ACTIVE_TASKS[claim_process.task_id] = claim_process
+    
+    thread = threading.Thread(target=claim_process.run)
+    thread.start()
+    
+    update.message.reply_text(f"Tugas klaim baru dengan ID `{claim_process.task_id}` telah dimulai di latar belakang.", parse_mode=ParseMode.MARKDOWN_V2)
+    return ConversationHandler.END
+
+def status_command(update: Update, context: CallbackContext) -> None:
+    if update.effective_user.id != ADMIN_CHAT_ID: return
+    
+    with task_lock:
+        if not ACTIVE_TASKS:
+            update.message.reply_text("Tidak ada tugas klaim yang sedang aktif.")
+            return
+
+        message = "*Tugas Aktif:*\n\n"
+        for task_id, task in ACTIVE_TASKS.items():
+            pk_short = f"...{task.pi_keypair.public_key[-5:]}" if task.pi_keypair else "N/A"
+            message += (f"🔹 *ID:* `{task_id}`\n"
+                        f"   *Akun:* `{pk_short}`\n"
+                        f"   *Status:* {task.status}\n\n")
+
+    update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+
+
+def cancel(update: Update, context: CallbackContext) -> int:
+    update.message.reply_text("Proses penambahan tugas dibatalkan.")
+    return ConversationHandler.END
+
+def main() -> None:
+    if TELEGRAM_BOT_TOKEN == "GANTI_DENGAN_TOKEN_BOT_ANDA" or ADMIN_CHAT_ID == 0:
+        print("!!! KESALAHAN: Harap isi TELEGRAM_BOT_TOKEN dan ADMIN_CHAT_ID di dalam skrip.")
+        return
+
+    updater = Updater(TELEGRAM_BOT_TOKEN)
+    dispatcher = updater.dispatcher
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('claim', claim_command)],
+        states={
+            WAITING_MNEMONIC: [MessageHandler(Filters.text & ~Filters.command, receive_mnemonic)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("status", status_command))
+    dispatcher.add_handler(conv_handler)
+    
+    print("Bot multi-claim sedang berjalan... Tekan Ctrl+C untuk berhenti.")
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
