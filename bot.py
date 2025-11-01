@@ -11,7 +11,7 @@ REMAIN_BALANCE = 1
 UNLOCKS = False
 NETWORK_PASSPHRASE = "Pi Network"
 HORIZON_URL = "http://4.194.35.14:31401"
-BASE_FEE = 20000000
+BASE_FEE = 40000000
 your_timezone = timezone(timedelta(hours=1))
 now_utc = datetime.now(timezone.utc)
 today_utc_str = now_utc.strftime("%Y-%m-%d")
@@ -228,5 +228,6 @@ else:
     print("No transaction prepared or unlock not ready.")
 
 print(f"[CLAIMABLE] Total: {total_claimable:.6f} Pi")
+
 
 
