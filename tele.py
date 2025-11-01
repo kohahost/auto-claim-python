@@ -28,7 +28,7 @@ BASE_FEE = 40000000 # Biaya dasar per operasi
 
 # -- Konfigurasi Akun --
 # Rahasia (Secret Key) akun yang akan membayar biaya transaksi
-TX_PAYER_SECRET = "SAVB25TPJNM7O5EO46R6TRAKIFLJDWSWWIP5WPKMU2Z72LZSH3QUWHGM"
+TX_PAYER_SECRET = ""
 # Alamat (Public Key) tujuan pengiriman Pi setelah di-klaim
 DESTINATION_ADDRESS = "GA2CXP2KK2PANC3JDEZLRKONYZBWXMTHY3N235QNJQFGGTJRUMPNM75X"
 
