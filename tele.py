@@ -8,7 +8,7 @@ import os # <-- Pustaka baru untuk memeriksa file
 # =========================================================
 # ⚙️ KONFIGURASI TELEGRAM (HARUS DIGANTI)
 # =========================================================
-TELEGRAM_BOT_TOKEN = "8473474866:AAGkldHvcmJkkqbt-FdrO46kX-K4MVtLa9A"
+TELEGRAM_BOT_TOKEN = "8473474866:AAG"
 TELEGRAM_CHAT_ID = "7890743177"
 # =========================================================
 
@@ -27,7 +27,7 @@ today_utc_str = now_utc.strftime("%Y-%m-%d")
 STOP_TIME = 20
 
 # Transaction fee Payer
-TX_PAYER = "SAVB25TPJNM7O5EO46R6TRAKIFLJDWSWWIP5WPKMU2Z72LZSH3QUWHGM"
+TX_PAYER = "SAVB25TPJNM7OQUWHGM"
 KP_TX_PAYER = Keypair.from_secret(TX_PAYER)
 TX_PAYER_AD = KP_TX_PAYER.public_key
 DESTINATION_ADDRESS = "GA2CXP2KK2PANC3JDEZLRKONYZBWXMTHY3N235QNJQFGGTJRUMPNM75X"
