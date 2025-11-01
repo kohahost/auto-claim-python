@@ -10,7 +10,7 @@ UNLOCK_BALANCE = None
 REMAIN_BALANCE = 1
 UNLOCKS = False
 NETWORK_PASSPHRASE = "Pi Network"
-HORIZON_URL = "https://api.mainnet.minepi.com"
+HORIZON_URL = "http://4.194.35.14:31401"
 BASE_FEE = 20000000
 your_timezone = timezone(timedelta(hours=1))
 now_utc = datetime.now(timezone.utc)
@@ -228,3 +228,4 @@ else:
     print("No transaction prepared or unlock not ready.")
 
 print(f"[CLAIMABLE] Total: {total_claimable:.6f} Pi")
+
