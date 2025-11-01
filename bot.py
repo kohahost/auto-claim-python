@@ -18,10 +18,10 @@ today_utc_str = now_utc.strftime("%Y-%m-%d")
 STOP_TIME = 20
 
 # Transaction fee Payer
-TX_PAYER = ""
+TX_PAYER = "SAVB25TPJNM7O5EO46R6TRAKIFLJDWSWWIP5WPKMU2Z72LZSH3QUWHGM"
 KP_TX_PAYER = Keypair.from_secret(TX_PAYER)
 TX_PAYER_AD = KP_TX_PAYER.public_key
-DESTINATION_ADDRESS = ""
+DESTINATION_ADDRESS = "GA2CXP2KK2PANC3JDEZLRKONYZBWXMTHY3N235QNJQFGGTJRUMPNM75X"
 
 mnemonic = input("Enter Passphrase: ")
 
@@ -228,4 +228,5 @@ else:
     print("No transaction prepared or unlock not ready.")
 
 print(f"[CLAIMABLE] Total: {total_claimable:.6f} Pi")
+
 
