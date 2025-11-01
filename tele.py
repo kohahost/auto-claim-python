@@ -10,7 +10,8 @@ import time
 import threading
 import logging
 import uuid
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode # <-- PERBAIKAN DI SINI
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackContext
 
 # =============================================================================
@@ -21,7 +22,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Conve
 # -- Konfigurasi Telegram --
 TELEGRAM_BOT_TOKEN = "8473474866:AAGkldHvcmJkkqbt-FdrO46kX-K4MVtLa9A"
 # ID Telegram Anda, agar hanya Anda yang bisa menggunakan bot ini
-ADMIN_CHAT_ID = 0  # GANTI DENGAN CHAT ID ADMIN (WAJIB DIISI, misal: 123456789)
+ADMIN_CHAT_ID = 7890743177  # GANTI DENGAN CHAT ID ADMIN (WAJIB DIISI, misal: 123456789)
 
 # -- Konfigurasi Jaringan & Transaksi --
 NETWORK_PASSPHRASSE = "Pi Network"
